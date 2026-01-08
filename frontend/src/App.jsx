@@ -6,12 +6,50 @@ import { Wallet, TrendingUp, DollarSign, PlusCircle, LayoutDashboard, List, Tras
 const COLORS = ['#10b981', '#3b82f6', '#f59e0b', '#8b5cf6', '#ec4899', '#6366f1'];
 
 const AssetLogo = ({ ticker }) => {
-  const [error, setError] = useState(false);
-  const cleanTicker = ticker ? ticker.replace('.SA', '').trim() : '';
+  const [imgError, setImgError] = useState(false);
+  
+  // Limpa o ticker (remove .SA e espaços)
+  const cleanTicker = ticker ? ticker.replace('.SA', '').trim().toUpperCase() : '';
+  
+  // URL do Logo (GitHub)
   const logoUrl = `https://raw.githubusercontent.com/filippofilip95/brazilian-stock-logos/main/logos/${cleanTicker}.png`;
-  const stringToColor = (str) => { let hash = 0; for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash); const c = (hash & 0x00FFFFFF).toString(16).toUpperCase(); return '#' + '00000'.substring(0, 6 - c.length) + c; };
-  if (error || !cleanTicker) return (<div className="w-10 h-10 rounded-full flex items-center justify-center text-xs font-bold text-white border border-slate-600 shadow-sm" style={{ backgroundColor: stringToColor(cleanTicker || 'XX') }}>{cleanTicker.substring(0, 2)}</div>);
-  return <img src={logoUrl} alt={ticker} className="w-10 h-10 rounded-full object-contain bg-white border border-slate-600" onError={() => setError(true)} />;
+  
+  // Função para gerar cor consistente baseada no nome (para o fallback)
+  const stringToColor = (str) => { 
+      let hash = 0; 
+      for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash); 
+      const c = (hash & 0x00FFFFFF).toString(16).toUpperCase(); 
+      return '#' + '00000'.substring(0, 6 - c.length) + c; 
+  };
+
+  // Se não tiver ticker ou se a imagem falhou ao carregar
+  if (!cleanTicker || imgError) {
+      return (
+          <div 
+            className="w-9 h-9 rounded-full flex items-center justify-center text-[10px] font-bold text-white border border-slate-600 shadow-sm shrink-0 select-none" 
+            style={{ 
+                backgroundColor: stringToColor(cleanTicker || 'XX'),
+                textShadow: '0px 1px 2px rgba(0,0,0,0.3)' 
+            }}
+            title={cleanTicker} // Mostra nome ao passar o mouse
+          >
+              {cleanTicker.substring(0, 2)}
+          </div>
+      );
+  }
+
+  return (
+      <img 
+        src={logoUrl} 
+        alt={cleanTicker} 
+        className="w-9 h-9 rounded-full object-contain bg-white border border-slate-600 shrink-0" 
+        // Se der erro (404), ativa o estado de erro para mostrar a bolinha
+        onError={(e) => {
+            e.target.style.display = 'none'; // Esconde imagem quebrada imediatamente
+            setImgError(true);
+        }} 
+      />
+  );
 };
 
 function App() {
@@ -35,6 +73,7 @@ function App() {
   const [sortConfig, setSortConfig] = useState({ key: 'total', direction: 'desc' });
   const [provFilter, setProvFilter] = useState({ start: '', end: '' });
 
+  // --- CONFIG IP ---
   const API_URL = 'http://127.0.0.1:8000'; 
 
   const fetchData = async () => {
@@ -226,8 +265,8 @@ function App() {
                <div className="flex justify-between items-center mb-8"><div><h1 className="text-3xl font-bold text-white mb-1">Lançamentos</h1><p className="text-slate-400">Histórico de operações</p></div><div className="flex gap-4"><button onClick={handleClearWallet} className="flex items-center gap-2 bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg font-bold transition-colors shadow-lg"><Trash2 size={20} /> Limpar Carteira</button><button onClick={() => setShowImport(!showImport)} className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded-lg font-bold transition-colors shadow-lg"><Upload size={20} /> {showImport ? 'Fechar Importação' : 'Importar em Massa'}</button></div></div>
                {showImport && (<div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-xl mb-8 animate-in fade-in slide-in-from-top-4"><h3 className="text-white font-bold mb-4">Importação em Lote</h3><div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-4"><div><label className="block text-slate-400 text-xs font-bold mb-2 uppercase">Data dos Aportes</label><input type="date" className="input-field w-full" value={importDate} onChange={e => setImportDate(e.target.value)} /><p className="text-xs text-slate-500 mt-2">Esta data será aplicada a todos os ativos abaixo.</p></div><div><label className="block text-slate-400 text-xs font-bold mb-2 uppercase">Instruções</label><p className="text-slate-400 text-sm">Cole sua lista no formato: <code>TICKER  QUANTIDADE  PREÇO</code>.</p><p className="text-slate-500 text-xs mt-1">Exemplo: VALE3  100  50,20</p></div></div><textarea className="w-full h-40 bg-slate-900 border border-slate-600 rounded-lg p-4 text-white font-mono text-sm focus:border-blue-500 outline-none" placeholder={`PETR4  100  35,50\nVALE3  50   60,20`} value={importText} onChange={e => setImportText(e.target.value)} /><div className="mt-4 flex justify-end"><button onClick={handleBulkImport} className="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-2 rounded-lg font-bold">Processar Importação</button></div></div>)}
                <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden shadow-lg w-full"><table className="w-full text-left text-slate-400"><thead className="bg-slate-900/50 text-xs uppercase font-bold text-slate-500"><tr><th className="px-6 py-4">Data</th><th className="px-6 py-4">Ativo</th><th className="px-6 py-4">Tipo</th><th className="px-6 py-4">Qtd</th><th className="px-6 py-4">Preço</th><th className="px-6 py-4">Total</th><th className="px-6 py-4 text-center">Ações</th></tr></thead><tbody className="divide-y divide-slate-700 text-sm">
-               {/* CORREÇÃO DO CRASH DA TABELA VAZIA AQUI */}
-               {transactions && transactions.length > 0 ? transactions.map(t=><tr key={t.id} className="hover:bg-slate-700/30 transition-colors"><td className="px-6 py-4">{new Date(t.date).toLocaleDateString('pt-BR',{timeZone:'UTC'})}</td><td className="px-6 py-4 font-bold text-white flex gap-2 items-center"><div className="w-2 h-2 rounded-full bg-emerald-500"></div>{t.ticker ? t.ticker.replace('.SA','') : ''}</td><td className="px-6 py-4 text-xs font-bold uppercase text-slate-500">{t.type}</td><td className="px-6 py-4">{t.quantity}</td><td className="px-6 py-4">R$ {t.price.toFixed(2)}</td><td className="px-6 py-4 text-white font-medium">R$ {(t.quantity*t.price).toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td className="px-6 py-4 flex justify-center gap-3"><button onClick={()=>{handleEdit(t)}} className="p-2 bg-slate-700 rounded hover:text-yellow-400 transition-colors"><Edit2 size={16}/></button><button onClick={()=>handleDelete(t.id)} className="p-2 bg-slate-700 rounded hover:text-red-400 transition-colors"><Trash2 size={16}/></button></td></tr>) : <tr><td colSpan="7" className="px-6 py-4 text-center text-slate-500">Nenhum lançamento encontrado.</td></tr>}
+               {/* AQUI ESTÁ A CORREÇÃO: TROCADO 'DIV' POR 'ASSETLOGO' */}
+               {transactions && transactions.length > 0 ? transactions.map(t=><tr key={t.id} className="hover:bg-slate-700/30 transition-colors"><td className="px-6 py-4">{new Date(t.date).toLocaleDateString('pt-BR',{timeZone:'UTC'})}</td><td className="px-6 py-4 font-bold text-white flex gap-2 items-center"><AssetLogo ticker={t.ticker}/>{t.ticker ? t.ticker.replace('.SA','') : ''}</td><td className="px-6 py-4 text-xs font-bold uppercase text-slate-500">{t.type}</td><td className="px-6 py-4">{t.quantity}</td><td className="px-6 py-4">R$ {t.price.toFixed(2)}</td><td className="px-6 py-4 text-white font-medium">R$ {(t.quantity*t.price).toLocaleString(undefined, {minimumFractionDigits: 2})}</td><td className="px-6 py-4 flex justify-center gap-3"><button onClick={()=>{handleEdit(t)}} className="p-2 bg-slate-700 rounded hover:text-yellow-400 transition-colors"><Edit2 size={16}/></button><button onClick={()=>handleDelete(t.id)} className="p-2 bg-slate-700 rounded hover:text-red-400 transition-colors"><Trash2 size={16}/></button></td></tr>) : <tr><td colSpan="7" className="px-6 py-4 text-center text-slate-500">Nenhum lançamento encontrado.</td></tr>}
                </tbody></table></div>
             </div>
           )}
