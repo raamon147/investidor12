@@ -51,22 +51,19 @@ function App() {
   
   // FILTROS
   const [chartRange, setChartRange] = useState('ALL'); 
-  const [earningsRange, setEarningsRange] = useState('1M'); // Começa selecionado 'Este Mês' para facilitar
+  const [earningsRange, setEarningsRange] = useState('1M'); 
+  const [customDateRange, setCustomDateRange] = useState({ start: '', end: '' }); // Filtro Personalizado
 
   const API_URL = 'http://127.0.0.1:8000'; 
 
   // --- CARREGA CARTEIRAS NO INÍCIO ---
-  useEffect(() => {
-      fetchWallets();
-  }, []);
+  useEffect(() => { fetchWallets(); }, []);
 
   const fetchWallets = async () => {
       try {
           const res = await axios.get(`${API_URL}/wallets/`);
           setWallets(res.data);
-          if (res.data.length > 0 && !selectedWallet) {
-              setSelectedWallet(res.data[0].id); // Seleciona a primeira
-          }
+          if (res.data.length > 0 && !selectedWallet) setSelectedWallet(res.data[0].id);
       } catch (err) { console.error(err); }
   };
 
@@ -75,13 +72,11 @@ function App() {
       if (!newWalletName) return;
       try {
           await axios.post(`${API_URL}/wallets/`, { name: newWalletName });
-          setNewWalletName("");
-          setShowCreateWallet(false);
-          fetchWallets();
+          setNewWalletName(""); setShowCreateWallet(false); fetchWallets();
       } catch (err) { alert("Erro ao criar carteira"); }
   };
 
-  // --- CARREGA DADOS DA CARTEIRA SELECIONADA ---
+  // --- CARREGA DADOS ---
   const fetchData = async () => {
     if (!selectedWallet) return;
     setLoading(true);
@@ -101,15 +96,11 @@ function App() {
       } else setTotalRentability(0);
       setLoading(false);
     } catch (error) { 
-        console.error(error); 
-        setLoading(false); 
-        setData({}); setTransactions([]); setEarnings({});
+        console.error(error); setLoading(false); setData({}); setTransactions([]); setEarnings({});
     }
   };
 
-  useEffect(() => {
-      if (selectedWallet) fetchData();
-  }, [selectedWallet]);
+  useEffect(() => { if (selectedWallet) fetchData(); }, [selectedWallet]);
 
   useEffect(() => {
     if (analysisResult) {
@@ -129,12 +120,8 @@ function App() {
     const now = new Date();
 
     if (chartRange === '1M') {
-        // AJUSTE: 1M agora pega o MÊS ATUAL (Dia 1 até hoje)
         const cutoff = new Date(now.getFullYear(), now.getMonth(), 1); 
-        slicedData = fullData.filter(d => { 
-            const [day, month, year] = d.name.split('/'); 
-            return new Date(`20${year}-${month}-${day}`) >= cutoff; 
-        });
+        slicedData = fullData.filter(d => { const [day, month, year] = d.name.split('/'); return new Date(`20${year}-${month}-${day}`) >= cutoff; });
     } else if (chartRange === '6M') {
         const cutoff = new Date(now); cutoff.setMonth(now.getMonth() - 6);
         slicedData = fullData.filter(d => { const [day, month, year] = d.name.split('/'); return new Date(`20${year}-${month}-${day}`) >= cutoff; });
@@ -154,7 +141,7 @@ function App() {
     }));
   }, [data, chartRange]);
 
-  // --- LÓGICA DE PROVENTOS (COM 1M = MÊS ATUAL) ---
+  // --- LÓGICA DE PROVENTOS (COM FILTRO PERSONALIZADO) ---
   const earningsStats = useMemo(() => {
       const emptyStats = { total: 0, history: [], list: [], ranking: [], classes: [] };
       if (!earnings) return emptyStats;
@@ -165,17 +152,34 @@ function App() {
       ];
 
       const now = new Date();
-      let cutoff = null; 
+      let startCutoff = null;
+      let endCutoff = null;
       
-      // AQUI ESTÁ A LÓGICA QUE VOCÊ PEDIU:
       if (earningsRange === '1M') { 
-          // Cria data: Ano Atual, Mês Atual, Dia 1
-          cutoff = new Date(now.getFullYear(), now.getMonth(), 1); 
+          startCutoff = new Date(now.getFullYear(), now.getMonth(), 1); 
       }
-      else if (earningsRange === '6M') { cutoff = new Date(now); cutoff.setMonth(now.getMonth() - 6); }
-      else if (earningsRange === '1Y') { cutoff = new Date(now); cutoff.setFullYear(now.getFullYear() - 1); }
+      else if (earningsRange === '6M') { 
+          startCutoff = new Date(now); startCutoff.setMonth(now.getMonth() - 6); 
+      }
+      else if (earningsRange === '1Y') { 
+          startCutoff = new Date(now); startCutoff.setFullYear(now.getFullYear() - 1); 
+      }
+      else if (earningsRange === 'CUSTOM' && customDateRange.start) {
+          // Filtro Personalizado
+          startCutoff = new Date(customDateRange.start);
+          if (customDateRange.end) {
+              endCutoff = new Date(customDateRange.end);
+              endCutoff.setHours(23, 59, 59); // Fim do dia
+          }
+      }
       
-      const filteredItems = cutoff ? allItems.filter(i => new Date(i.date) >= cutoff) : allItems;
+      // Aplicando Filtro
+      const filteredItems = allItems.filter(i => {
+          const d = new Date(i.date);
+          if (startCutoff && d < startCutoff) return false;
+          if (endCutoff && d > endCutoff) return false;
+          return true;
+      });
 
       let total = 0;
       const monthly = {};
@@ -209,32 +213,14 @@ function App() {
       const list = filteredItems.sort((a, b) => new Date(b.date) - new Date(a.date));
 
       return { total, history, list, ranking, classes };
-  }, [earnings, earningsRange]);
+  }, [earnings, earningsRange, customDateRange]);
 
 
   const normalizeTickerToSend = (rawTicker) => { if (!rawTicker) return ""; const t = rawTicker.toUpperCase().trim(); if (t.includes('.')) return t; if (/[0-9]$/.test(t)) return t + ".SA"; return t; };
   const detectAssetType = (ticker) => { const t = ticker.toUpperCase().trim(); if (t.endsWith('34') || t.endsWith('39') || t.endsWith('33') || t.endsWith('32')) return 'BDR'; if (t.endsWith('11')) return 'FII'; if (/[3456]$/.test(t)) return 'Acao'; return 'Acao'; };
   const handleAutoPrice = async () => { if (!novoAporte.date || !novoAporte.ticker || novoAporte.ticker.length < 3) return; const detectedType = detectAssetType(novoAporte.ticker); setNovoAporte(prev => ({ ...prev, type: detectedType })); const tickerSmart = normalizeTickerToSend(novoAporte.ticker); try { const response = await axios.get(`${API_URL}/get-price`, { params: { ticker: tickerSmart, date: novoAporte.date } }); if (response.data.price > 0) setNovoAporte(prev => ({ ...prev, price: response.data.price, type: detectedType })); } catch (error) { console.error(error); } };
-  
-  const handleSubmit = async (e) => { 
-      e.preventDefault(); 
-      if(!novoAporte.ticker || !novoAporte.quantity || !novoAporte.price || !selectedWallet) return; 
-      const tickerSmart = normalizeTickerToSend(novoAporte.ticker); 
-      const payload = { ...novoAporte, wallet_id: selectedWallet, ticker: tickerSmart, quantity: Number(novoAporte.quantity), price: Number(novoAporte.price) }; 
-      if (editingId) { await axios.put(`${API_URL}/transactions/${editingId}`, payload); setEditingId(null); } 
-      else { await axios.post(`${API_URL}/transactions/`, payload); } 
-      setNovoAporte({ ...novoAporte, ticker: '', quantity: '', price: '' }); 
-      fetchData(); 
-  };
-  
-  const handleBulkImport = async () => { 
-      if (!importText || !selectedWallet) return; 
-      const lines = importText.split('\n'); 
-      const bulkData = []; 
-      lines.forEach(line => { const parts = line.split(/[\t; ]+/); if (parts.length >= 3) { let ticker = parts[0].trim().toUpperCase(); let qtd = parts[1].replace(',', '.'); let price = parts[2].replace('R$', '').replace(',', '.').trim(); if (ticker && !isNaN(qtd) && !isNaN(price)) { if (!ticker.includes('.') && /[0-9]$/.test(ticker)) ticker += ".SA"; bulkData.push({ wallet_id: selectedWallet, ticker: ticker, date: importDate, quantity: Number(qtd), price: Number(price), type: detectAssetType(ticker) }); } } }); 
-      if (bulkData.length > 0) { await axios.post(`${API_URL}/transactions/bulk`, bulkData); setImportText(""); setShowImport(false); fetchData(); alert(`${bulkData.length} ativos importados!`); } else { alert("Nenhum dado válido."); } 
-  };
-  
+  const handleSubmit = async (e) => { e.preventDefault(); if(!novoAporte.ticker || !novoAporte.quantity || !novoAporte.price || !selectedWallet) return; const tickerSmart = normalizeTickerToSend(novoAporte.ticker); const payload = { ...novoAporte, wallet_id: selectedWallet, ticker: tickerSmart, quantity: Number(novoAporte.quantity), price: Number(novoAporte.price) }; if (editingId) { await axios.put(`${API_URL}/transactions/${editingId}`, payload); setEditingId(null); } else { await axios.post(`${API_URL}/transactions/`, payload); } setNovoAporte({ ...novoAporte, ticker: '', quantity: '', price: '' }); fetchData(); };
+  const handleBulkImport = async () => { if (!importText || !selectedWallet) return; const lines = importText.split('\n'); const bulkData = []; lines.forEach(line => { const parts = line.split(/[\t; ]+/); if (parts.length >= 3) { let ticker = parts[0].trim().toUpperCase(); let qtd = parts[1].replace(',', '.'); let price = parts[2].replace('R$', '').replace(',', '.').trim(); if (ticker && !isNaN(qtd) && !isNaN(price)) { if (!ticker.includes('.') && /[0-9]$/.test(ticker)) ticker += ".SA"; bulkData.push({ wallet_id: selectedWallet, ticker: ticker, date: importDate, quantity: Number(qtd), price: Number(price), type: detectAssetType(ticker) }); } } }); if (bulkData.length > 0) { await axios.post(`${API_URL}/transactions/bulk`, bulkData); setImportText(""); setShowImport(false); fetchData(); alert(`${bulkData.length} ativos importados!`); } else { alert("Nenhum dado válido."); } };
   const handleClearWallet = async () => { if (window.confirm("Apagar TUDO desta carteira?")) { await axios.delete(`${API_URL}/transactions/clear_all`, { params: { wallet_id: selectedWallet } }); fetchData(); } };
   const handleDelete = async (id) => { if (window.confirm("Excluir?")) { await axios.delete(`${API_URL}/transactions/${id}`); fetchData(); } };
   const handleEdit = (trans) => { setEditingId(trans.id); setNovoAporte({ ticker: trans.ticker.replace('.SA',''), date: trans.date, quantity: trans.quantity, price: trans.price, type: trans.type }); setView('dashboard'); };
@@ -266,28 +252,18 @@ function App() {
       <main className="flex-1 ml-20 p-6 md:p-8 w-full min-h-screen overflow-y-auto bg-slate-900">
         <div className="max-w-[1920px] mx-auto w-full space-y-8">
           
-          {/* HEADER COM SELETOR DE CARTEIRA */}
+          {/* HEADER */}
           <header className="flex flex-col md:flex-row justify-between items-start md:items-center w-full gap-4">
             <div className="flex items-center gap-6">
-                <div>
-                    <h1 className="text-3xl font-bold text-white mb-1">Investidor12</h1>
-                    <p className="text-slate-400 capitalize">{view === 'analysis' ? 'Raio-X do Mamute' : (view === 'dashboard' ? 'Visão Geral' : view)}</p>
-                </div>
-                
-                {/* DROPDOWN DE CARTEIRA */}
+                <div><h1 className="text-3xl font-bold text-white mb-1">Investidor12</h1><p className="text-slate-400 capitalize">{view === 'analysis' ? 'Raio-X do Mamute' : (view === 'dashboard' ? 'Visão Geral' : view)}</p></div>
                 <div className="flex items-center gap-2 bg-slate-800 p-1.5 rounded-xl border border-slate-700 shadow-md">
                     <div className="p-2 bg-slate-700 rounded-lg text-emerald-400"><Briefcase size={20}/></div>
-                    <select 
-                        className="bg-transparent text-white font-bold outline-none text-sm min-w-[150px] cursor-pointer"
-                        value={selectedWallet || ""}
-                        onChange={(e) => setSelectedWallet(Number(e.target.value))}
-                    >
+                    <select className="bg-transparent text-white font-bold outline-none text-sm min-w-[150px] cursor-pointer" value={selectedWallet || ""} onChange={(e) => setSelectedWallet(Number(e.target.value))}>
                         {wallets.map(w => <option key={w.id} value={w.id} className="bg-slate-800">{w.name}</option>)}
                     </select>
                     <button onClick={() => setShowCreateWallet(true)} className="p-1.5 hover:bg-slate-700 rounded-lg text-slate-400 hover:text-white transition-colors" title="Nova Carteira"><Plus size={18}/></button>
                 </div>
             </div>
-
             {view === 'dashboard' && (<div className="bg-slate-800 px-6 py-3 rounded-xl border border-slate-700 flex flex-col items-end shadow-md"><span className="text-slate-400 text-xs uppercase font-bold tracking-wider">Rentabilidade Total</span><span className={`text-2xl font-bold ${totalRentability >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{totalRentability.toFixed(2)}%</span></div>)}
           </header>
 
@@ -305,7 +281,7 @@ function App() {
               </div>
           )}
 
-          {/* ... CONTEÚDO DAS VIEWS (MANTIDO) ... */}
+          {/* ... OUTRAS VIEWS (IGUAIS) ... */}
           {view === 'analysis' && (
               <div className="max-w-4xl mx-auto">
                   <form onSubmit={handleAnalyze} className="flex gap-4 mb-8">
@@ -343,16 +319,34 @@ function App() {
             <>
                <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
                    <h2 className="text-2xl font-bold text-white flex items-center gap-2"><DollarSign className="text-emerald-400"/> Proventos</h2>
-                   <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-lg">
-                      {/* --- AJUSTE: BOTÕES COM NOME MAIS CLARO --- */}
-                      <button onClick={() => setEarningsRange('1M')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '1M' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>Este Mês</button>
-                      <button onClick={() => setEarningsRange('6M')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '6M' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>6 Meses</button>
-                      <button onClick={() => setEarningsRange('1Y')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '1Y' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>1 Ano</button>
-                      <button onClick={() => setEarningsRange('ALL')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === 'ALL' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>Tudo</button>
+                   
+                   {/* BARRA DE FILTROS COM DATA PERSONALIZADA */}
+                   <div className="flex items-center gap-2">
+                       {/* Inputs de Data (Só aparecem se for Personalizado) */}
+                       {earningsRange === 'CUSTOM' && (
+                           <div className="flex items-center gap-2 bg-slate-800 p-1 px-3 rounded-lg border border-slate-700 mr-2 animate-in fade-in slide-in-from-right-2">
+                               <div className="flex flex-col">
+                                   <label className="text-[9px] font-bold text-slate-500 uppercase">Início</label>
+                                   <input type="date" className="bg-transparent text-white text-xs outline-none w-24" value={customDateRange.start} onChange={e => setCustomDateRange({...customDateRange, start: e.target.value})} />
+                               </div>
+                               <div className="w-px h-6 bg-slate-700"></div>
+                               <div className="flex flex-col">
+                                   <label className="text-[9px] font-bold text-slate-500 uppercase">Fim</label>
+                                   <input type="date" className="bg-transparent text-white text-xs outline-none w-24" value={customDateRange.end} onChange={e => setCustomDateRange({...customDateRange, end: e.target.value})} />
+                               </div>
+                           </div>
+                       )}
+
+                       <div className="flex bg-slate-800 rounded-lg p-1 border border-slate-700 shadow-lg">
+                          <button onClick={() => setEarningsRange('1M')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '1M' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>Este Mês</button>
+                          <button onClick={() => setEarningsRange('6M')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '6M' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>6 Meses</button>
+                          <button onClick={() => setEarningsRange('1Y')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === '1Y' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>1 Ano</button>
+                          <button onClick={() => setEarningsRange('ALL')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all ${earningsRange === 'ALL' ? 'bg-emerald-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>Tudo</button>
+                          <button onClick={() => setEarningsRange('CUSTOM')} className={`px-4 py-2 text-xs font-bold rounded-md transition-all flex items-center gap-1 ${earningsRange === 'CUSTOM' ? 'bg-blue-600 text-white shadow' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}><Filter size={12}/> Personalizado</button>
+                       </div>
                    </div>
                </div>
 
-               {/* CALENDÁRIO FUTURO (SEMPRE MOSTRA TUDO) */}
                {earnings && earnings.provisionados && earnings.provisionados.length > 0 && (
                    <div className="mb-8 p-4 bg-gradient-to-r from-slate-800 to-slate-900 border border-emerald-500/30 rounded-xl shadow-lg animate-in fade-in">
                        <h3 className="text-emerald-400 font-bold flex items-center gap-2 mb-4"><Calendar size={20}/> Futuros (Provisionados)</h3>
@@ -433,10 +427,8 @@ function App() {
             </>
           )}
 
-          {/* ... VIEW DASHBOARD (IGUAL AO ANTERIOR) ... */}
           {view === 'dashboard' && data && (
             <>
-              {/* Cards e Gráfico Dashboard (Copiar do anterior, não mudou) */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full">
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg relative overflow-hidden group hover:border-emerald-500/30 transition-all"><div className="relative z-10"><p className="text-slate-400 text-sm font-medium mb-2">Patrimônio Total</p><div className="flex items-baseline gap-3"><h2 className="text-3xl font-bold text-white">R$ {data.patrimonio_atual.toLocaleString()}</h2><span className={`text-sm px-2 py-0.5 rounded font-bold ${data.rentabilidade_pct >= 0 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'}`}>{data.rentabilidade_pct.toFixed(1)}%</span></div><p className="text-slate-500 text-sm mt-3 font-medium">Investido: <span className="text-slate-300">R$ {data.total_investido.toLocaleString()}</span></p></div><div className="absolute right-4 top-6 text-slate-700/20 group-hover:scale-110 transition-transform"><Wallet size={64} /></div></div>
                 <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 shadow-lg flex flex-col justify-center relative group hover:border-blue-500/30 transition-all"><p className="text-slate-400 text-sm font-medium mb-2">Performance Hoje</p><div className="flex items-center gap-2 mb-1"><h2 className={`text-3xl font-bold ${data.daily_variation == 0 ? 'text-slate-200' : (data.daily_variation > 0 ? 'text-emerald-400' : 'text-red-400')}`}>{data.daily_variation > 0 ? '+' : ''}{typeof data.daily_variation === 'number' ? data.daily_variation.toFixed(2) : data.daily_variation}%</h2>{data.daily_variation !== 0 && <Activity size={24} className={data.daily_variation > 0 ? 'text-emerald-400' : 'text-red-400'} />}</div><p className="text-slate-400 text-sm mt-2">Hoje sua carteira está rendendo:</p></div>
