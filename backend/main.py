@@ -6,6 +6,7 @@ import requests
 import yfinance as yf
 import pandas as pd
 import math
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +25,30 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.resources import Resource
 
-# --- FIX SSL (Seu código original) ---
+# --- CORREÇÃO CENTRALIZADA (v5): FÁBRICA DE CONEXÕES SEGURAS ---
+def get_safe_ticker(ticker: str):
+    """
+    Cria um objeto Ticker blindado contra bloqueios e com sufixo .SA automático.
+    Retorna: objeto yf.Ticker pronto para uso com sessão fake de navegador.
+    """
+    # 1. Garante string, maiúscula e sem espaços
+    ticker = str(ticker).upper().strip()
+    
+    # 2. Adiciona .SA se não tiver e não for índice (ex: ^BVSP)
+    if not ticker.endswith('.SA') and not ticker.startswith('^'):
+        ticker += '.SA'
+    
+    # 3. Cria sessão disfarçada de Google Chrome (Evita erro 429 Too Many Requests)
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    })
+
+    # 4. Retorna o objeto conectado
+    return yf.Ticker(ticker, session=session)
+# -------------------------------------------------------------
+
+# --- FIX SSL (Mantido do original) ---
 try:
     original_ca = certifi.where()
     system_temp_dir = tempfile.gettempdir()
@@ -47,9 +71,7 @@ def safe_float(val):
         return f
     except: return 0.0
 
-# --- NOTE: Banco de Dados ---
-# Atenção: No Docker, esse arquivo .db será apagado se o container for recriado
-# a menos que usemos Volumes (veremos isso na fase de Kubernetes).
+# --- DB SETUP ---
 SQLALCHEMY_DATABASE_URL = "sqlite:///./meu_patrimonio_v2.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -89,22 +111,14 @@ class TransactionCreate(BaseModel):
 
 app = FastAPI(title="Investidor12 Multi-Wallet")
 
-# --- DEVOPS: Configuração do OpenTelemetry (Tracing) ---
-# Isso vai fazer o Python imprimir no terminal cada requisição que chegar.
-# No futuro, mudaremos o 'ConsoleSpanExporter' para mandar pro Grafana.
+# --- OBSERVABILIDADE ---
 resource = Resource(attributes={"service.name": "investidor12-backend"})
 provider = TracerProvider(resource=resource)
-processor = BatchSpanProcessor(ConsoleSpanExporter()) # Joga o trace no terminal
+processor = BatchSpanProcessor(ConsoleSpanExporter())
 provider.add_span_processor(processor)
 trace.set_tracer_provider(provider)
-
-# Instrumenta o FastAPI automaticamente (monitora todas as rotas)
 FastAPIInstrumentor.instrument_app(app)
-
-# --- DEVOPS: Configuração do Prometheus (Métricas) ---
-# Cria a rota /metrics automaticamente
 Instrumentator().instrument(app).expose(app)
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,23 +133,27 @@ def get_db():
     try: yield db
     finally: db.close()
 
-# --- HELPERS ---
+# --- HELPERS (WORKERS) AJUSTADOS ---
+
 def get_realtime_price_worker(ticker):
-    # DEVOPS: Criando um trace manual para monitorar a chamada externa
-    tracer = trace.get_tracer(__name__)
-    with tracer.start_as_current_span("external_api_yfinance") as span:
-        span.set_attribute("ticker", ticker)
-        try:
-            t = yf.Ticker(ticker)
-            p = t.fast_info.get('last_price')
-            if p and not math.isnan(p): return ticker, safe_float(p)
-            h = t.history(period="1d")
-            if not h.empty: return ticker, safe_float(h['Close'].iloc[-1])
-            return ticker, 0.0
-        except: return ticker, 0.0
+    """Worker usado pelo fetch_prices_parallel (Dashboard)"""
+    try:
+        # CORREÇÃO: Usa get_safe_ticker
+        t = get_safe_ticker(ticker)
+        p = t.fast_info.get('last_price')
+        if p and not math.isnan(p): return ticker, safe_float(p)
+        
+        # Fallback para history
+        h = t.history(period="1d")
+        if not h.empty: return ticker, safe_float(h['Close'].iloc[-1])
+        return ticker, 0.0
+    except: return ticker, 0.0
 
 def get_divs_worker(ticker):
-    try: return ticker, yf.Ticker(ticker).dividends
+    """Worker usado pelo get_earnings (Proventos)"""
+    try: 
+        # CORREÇÃO: Usa get_safe_ticker
+        return ticker, get_safe_ticker(ticker).dividends
     except: return ticker, None
 
 def fetch_prices_parallel(tickers):
@@ -225,12 +243,34 @@ def update_trans(id: int, trans: TransactionCreate, db: Session = Depends(get_db
         db.commit()
     return {"message": "OK"}
 
+# --- CORREÇÃO DEVOPS: Rota de Preço Histórico Real ---
 @app.get("/get-price")
 def price_check(ticker: str, date: str):
-    t, p = get_realtime_price_worker(ticker.upper())
-    return {"price": round(p, 2)}
+    try:
+        # Converte a data string para objeto e define intervalo de 4 dias (pra pegar feriados)
+        dt = datetime.strptime(date, '%Y-%m-%d')
+        start_date = dt.strftime('%Y-%m-%d')
+        end_date = (dt + timedelta(days=4)).strftime('%Y-%m-%d')
+        
+        # CORREÇÃO: Usa get_safe_ticker
+        t = get_safe_ticker(ticker)
+        
+        # Baixa histórico
+        hist = t.history(start=start_date, end=end_date)
+        
+        if hist.empty:
+            return {"ticker": ticker, "date": date, "price": 0}
+        
+        # Pega o primeiro preço de fechamento disponível
+        price = float(hist['Close'].iloc[0])
+        
+        return {"ticker": ticker, "date": date, "price": round(price, 2)}
 
-# --- ROTAS DE DADOS (FILTRADAS POR CARTEIRA) ---
+    except Exception as e:
+        print(f"Erro ao buscar preço de {ticker}: {e}")
+        return {"ticker": ticker, "date": date, "price": 0}
+
+# --- ROTAS DE DADOS (DASHBOARD/PROVENTOS) ---
 
 @app.get("/earnings")
 def get_earnings(wallet_id: int, db: Session = Depends(get_db)):
@@ -245,6 +285,7 @@ def get_earnings(wallet_id: int, db: Session = Depends(get_db)):
 
     div_data = {}
     with ThreadPoolExecutor(max_workers=4) as ex:
+        # AQUI O WORKER JÁ USA O SAFE_TICKER AGORA
         results = ex.map(get_divs_worker, list(holdings.keys()))
         for t, d in results: 
             if d is not None: div_data[t] = d
@@ -259,20 +300,21 @@ def get_earnings(wallet_id: int, db: Session = Depends(get_db)):
     hoje = date.today()
 
     for ticker, t_list in holdings.items():
-        # --- CORREÇÃO DEVOPS: Blindagem contra dados ruins do yfinance ---
+        # --- BLINDAGEM CONTRA ERROS DO YFINANCE ---
         if ticker not in div_data: 
             continue
             
         divs = div_data[ticker]
         
-        # Se vier uma lista (erro) ou None, ignora e pula para o próximo
+        # Proteção contra Listas (Erro 500 que tivemos antes)
         if isinstance(divs, list) or divs is None:
             continue
             
-        # Se for um Pandas Series mas estiver vazio
+        # Proteção contra DataFrame vazio
         if hasattr(divs, 'empty') and divs.empty:
             continue
-        # -----------------------------------------------------------------
+        # ------------------------------------------
+
         if divs.index.tz is not None: divs.index = divs.index.tz_localize(None)
         
         first_buy_date = min(t.date for t in t_list)
@@ -337,13 +379,17 @@ def get_dashboard(wallet_id: int, db: Session = Depends(get_db)):
     tickers = list(set(t.ticker for t in trans))
     precos_atuais = fetch_prices_parallel(tickers)
 
+    # --- O download em massa do yfinance é mais difícil de "disfarçar" ---
+    # Se falhar aqui, o gráfico fica sem histórico, mas o app não quebra
     try:
         data_inicio_real = min(t.date for t in trans)
         lista_download = tickers + ['^BVSP']
+        # Tenta download normal. Se der rate limit, vai cair no except
         dados_historicos = yf.download(lista_download, start=data_inicio_real, progress=False, auto_adjust=True)['Close']
         if not dados_historicos.empty:
             dados_historicos = dados_historicos.ffill().bfill()
-    except:
+    except Exception as e:
+        print(f"Erro no download de histórico (Dashboard): {e}")
         dados_historicos = pd.DataFrame()
 
     patrimonio_total = 0
@@ -404,6 +450,7 @@ def get_dashboard(wallet_id: int, db: Session = Depends(get_db)):
 
     chart_data = []
     if not dados_historicos.empty:
+        # (Lógica do gráfico mantida, apenas protegida pelo try/except acima)
         if dados_historicos.index.tz is not None: 
             dados_historicos.index = dados_historicos.index.tz_localize(None)
         
@@ -487,34 +534,58 @@ def get_dashboard(wallet_id: int, db: Session = Depends(get_db)):
         "ativos": ativos_finais
     }
 
-# ... (O restante da rota /analyze continua igual)
+# --- ROTA ANALYZE (RAIO-X DO MAMUTE) ---
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
-    # Apenas adicionei o rastreamento aqui também
+    # Rastreamento OpenTelemetry
     tracer = trace.get_tracer(__name__)
     with tracer.start_as_current_span("analyze_stock_mamute") as span:
         span.set_attribute("ticker", ticker)
         
-        # --- CÓDIGO ORIGINAL ABAIXO ---
-        ticker = ticker.upper().strip()
-        clean = ticker.replace('.SA', '')
-        if not ticker.endswith('.SA'): ticker += '.SA'
-        
-        res = { "ticker": clean, "price": 0, "score": 0, "verdict": "Indisponível", "criteria": { "profit": {"status": "GRAY"}, "governance": {"status": "GRAY"}, "debt": {"status": "GRAY"}, "ipo": {"status": "GRAY"} } }
+        # Prepara o objeto de resposta padrão (Caso dê erro, retorna cinza/indisponível)
+        clean_ticker = ticker.upper().replace('.SA', '').strip()
+        res = { 
+            "ticker": clean_ticker, 
+            "price": 0, 
+            "score": 0, 
+            "verdict": "Indisponível", 
+            "criteria": { 
+                "profit": {"status": "GRAY"}, 
+                "governance": {"status": "GRAY"}, 
+                "debt": {"status": "GRAY"}, 
+                "ipo": {"status": "GRAY"} 
+            } 
+        }
+
         try:
-            t = yf.Ticker(ticker)
-            try: i = t.info
-            except: return res
-            if not i: return res
+            # --- USANDO A FUNÇÃO BLINDADA ---
+            t = get_safe_ticker(ticker)
+            
+            # Tenta buscar informações básicas
+            try:
+                i = t.info
+            except Exception as e:
+                print(f"Erro ao buscar info do ticker {ticker}: {e}")
+                return res
+
+            if not i:
+                return res
+
+            # --- LÓGICA DO MAMUTE ---
             res["price"] = i.get('currentPrice', 0)
             
             ipo = 0
             MAMUTES = ['VALE3','PETR4','PETR3','ITUB4','BBDC4','BBDC3','BBAS3','ABEV3','WEGE3','EGIE3','ITSA4','SANB11','GGBR4','GOAU4','CMIG4','ELET3','ELET6','CSNA3','RADL3','VIVT3','TIMS3','CSMG3','SBSP3','CPLE6','TAEE11','KLBN11','VULC3','LEVE3','TUPY3','PRIO3','POMO4','SAPR11','TRPL4','FLRY3','RENT3','LREN3','JBSS3','BRFS3','MGLU3']
-            if clean in MAMUTES: ipo = 20
+            
+            if clean_ticker in MAMUTES: 
+                ipo = 20
             else:
                 ts = i.get('firstTradeDateEpochUtc')
-                if ts: ipo = (datetime.now() - datetime.fromtimestamp(ts)).days / 365
-                else: ipo = 5 
+                if ts: 
+                    ipo = (datetime.now() - datetime.fromtimestamp(ts)).days / 365
+                else: 
+                    ipo = 5 
+            
             s_ipo = "GREEN" if ipo > 7 else ("YELLOW" if ipo >= 5 else "RED")
             sc = 2 if s_ipo == "GREEN" else (1 if s_ipo == "YELLOW" else 0)
             
@@ -527,7 +598,9 @@ def analyze(ticker: str):
                     if v:
                         yrs = len(v)
                         if sum(1 for x in v if x > 0) == yrs: prof_ok = True
-            except: pass
+            except: 
+                pass 
+            
             if yrs == 0 and i.get('trailingEps', 0) > 0: prof_ok = True
             s_prof = "GREEN" if prof_ok else "RED"
             sc += 2 if prof_ok else 0
@@ -538,7 +611,7 @@ def analyze(ticker: str):
             elif dr and dr > 2: s_debt = "YELLOW"; sc += 1
             else: sc += 2
             
-            on = clean[-1] == '3'
+            on = clean_ticker.endswith('3')
             s_gov = "GREEN" if on else "YELLOW"
             sc += 2 if on else 1
             
@@ -547,7 +620,17 @@ def analyze(ticker: str):
             elif sc >= 8: verd = "Mamute Azul"
             else: verd = "Mamute Amarelo"
             
-            res["score"] = sc; res["verdict"] = verd
-            res["criteria"] = { "profit": {"status": s_prof, "years": yrs}, "governance": {"status": s_gov, "type": "ON" if on else "PN"}, "debt": {"status": s_debt, "current_ratio": round(dr,2) if dr else 0}, "ipo": {"status": s_ipo, "years": round(ipo,1)} }
+            res["score"] = sc
+            res["verdict"] = verd
+            res["criteria"] = { 
+                "profit": {"status": s_prof, "years": yrs}, 
+                "governance": {"status": s_gov, "type": "ON" if on else "PN"}, 
+                "debt": {"status": s_debt, "current_ratio": round(dr,2) if dr else 0}, 
+                "ipo": {"status": s_ipo, "years": round(ipo,1)} 
+            }
+            return res
+
+        except Exception as e:
+            print(f"ERRO CRÍTICO NO ANALYZE ({ticker}): {e}")
             return res
         except: return res

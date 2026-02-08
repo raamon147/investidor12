@@ -1,0 +1,22 @@
+# Configurações do Backend (Python)
+backend:
+  name: backend
+  image:
+    repository: investidor12-api
+    tag: "v5"
+    pullPolicy: Never 
+  service:
+    port: 8000
+  persistence:
+    enabled: true
+    name: db-volume
+
+# Configurações do Frontend (React)
+frontend:
+  name: frontend
+  image:
+    repository: investidor12-front
+    tag: "v1"
+    pullPolicy: Never
+  service:
+    port: 80

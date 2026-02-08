@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.backend.name }} # Usa a variável do values.yaml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Values.backend.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.backend.name }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+          imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.backend.service.port }}
+          # Volume para salvar o banco SQLite
+          volumeMounts:
+            - mountPath: /app/meu_patrimonio_v2.db
+              name: storage
+      volumes:
+        - name: storage
+          hostPath:
+            path: /tmp/meu_patrimonio_v2.db
+            type: FileOrCreate
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.backend.name }}-svc
+spec:
+  type: ClusterIP
+  selector:
+    app: {{ .Values.backend.name }}
+  ports:
+    - port: {{ .Values.backend.service.port }}
+      targetPort: {{ .Values.backend.service.port }}
