@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: {{ .Values.backend.name }} # Usa a variável do values.yaml
 spec:
-  replicas: 1
+  replicas: {{ .Values.backend.replicas }}
   selector:
     matchLabels:
       app: {{ .Values.backend.name }}
