@@ -16,7 +16,15 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
-# --- FIX SSL ---
+# --- DEVOPS: Importações de Observabilidade ---
+from prometheus_fastapi_instrumentator import Instrumentator
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.resources import Resource
+
+# --- FIX SSL (Seu código original) ---
 try:
     original_ca = certifi.where()
     system_temp_dir = tempfile.gettempdir()
@@ -39,6 +47,9 @@ def safe_float(val):
         return f
     except: return 0.0
 
+# --- NOTE: Banco de Dados ---
+# Atenção: No Docker, esse arquivo .db será apagado se o container for recriado
+# a menos que usemos Volumes (veremos isso na fase de Kubernetes).
 SQLALCHEMY_DATABASE_URL = "sqlite:///./meu_patrimonio_v2.db"
 engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -54,7 +65,7 @@ class WalletDB(Base):
 class TransactionDB(Base):
     __tablename__ = "transactions"
     id = Column(Integer, primary_key=True, index=True)
-    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False) # Vínculo com Carteira
+    wallet_id = Column(Integer, ForeignKey("wallets.id"), nullable=False)
     ticker = Column(String, index=True)
     date = Column(Date)
     quantity = Column(Float)
@@ -78,6 +89,23 @@ class TransactionCreate(BaseModel):
 
 app = FastAPI(title="Investidor12 Multi-Wallet")
 
+# --- DEVOPS: Configuração do OpenTelemetry (Tracing) ---
+# Isso vai fazer o Python imprimir no terminal cada requisição que chegar.
+# No futuro, mudaremos o 'ConsoleSpanExporter' para mandar pro Grafana.
+resource = Resource(attributes={"service.name": "investidor12-backend"})
+provider = TracerProvider(resource=resource)
+processor = BatchSpanProcessor(ConsoleSpanExporter()) # Joga o trace no terminal
+provider.add_span_processor(processor)
+trace.set_tracer_provider(provider)
+
+# Instrumenta o FastAPI automaticamente (monitora todas as rotas)
+FastAPIInstrumentor.instrument_app(app)
+
+# --- DEVOPS: Configuração do Prometheus (Métricas) ---
+# Cria a rota /metrics automaticamente
+Instrumentator().instrument(app).expose(app)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -93,14 +121,18 @@ def get_db():
 
 # --- HELPERS ---
 def get_realtime_price_worker(ticker):
-    try:
-        t = yf.Ticker(ticker)
-        p = t.fast_info.get('last_price')
-        if p and not math.isnan(p): return ticker, safe_float(p)
-        h = t.history(period="1d")
-        if not h.empty: return ticker, safe_float(h['Close'].iloc[-1])
-        return ticker, 0.0
-    except: return ticker, 0.0
+    # DEVOPS: Criando um trace manual para monitorar a chamada externa
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("external_api_yfinance") as span:
+        span.set_attribute("ticker", ticker)
+        try:
+            t = yf.Ticker(ticker)
+            p = t.fast_info.get('last_price')
+            if p and not math.isnan(p): return ticker, safe_float(p)
+            h = t.history(period="1d")
+            if not h.empty: return ticker, safe_float(h['Close'].iloc[-1])
+            return ticker, 0.0
+        except: return ticker, 0.0
 
 def get_divs_worker(ticker):
     try: return ticker, yf.Ticker(ticker).dividends
@@ -126,7 +158,6 @@ def create_wallet(wallet: WalletCreate, db: Session = Depends(get_db)):
 @app.get("/wallets/")
 def list_wallets(db: Session = Depends(get_db)):
     wallets = db.query(WalletDB).all()
-    # Se não existir nenhuma, cria a padrão automaticamente
     if not wallets:
         def_wallet = WalletDB(name="Carteira Principal", description="Padrão")
         db.add(def_wallet)
@@ -166,7 +197,6 @@ def create_bulk(transactions: List[TransactionCreate], db: Session = Depends(get
 
 @app.delete("/transactions/clear_all")
 def clear_all(wallet_id: int, db: Session = Depends(get_db)):
-    # Limpa apenas da carteira selecionada
     db.query(TransactionDB).filter(TransactionDB.wallet_id == wallet_id).delete()
     db.commit()
     return {"message": "Limpo"}
@@ -229,9 +259,20 @@ def get_earnings(wallet_id: int, db: Session = Depends(get_db)):
     hoje = date.today()
 
     for ticker, t_list in holdings.items():
-        if ticker not in div_data or div_data[ticker].empty: continue
-        
+        # --- CORREÇÃO DEVOPS: Blindagem contra dados ruins do yfinance ---
+        if ticker not in div_data: 
+            continue
+            
         divs = div_data[ticker]
+        
+        # Se vier uma lista (erro) ou None, ignora e pula para o próximo
+        if isinstance(divs, list) or divs is None:
+            continue
+            
+        # Se for um Pandas Series mas estiver vazio
+        if hasattr(divs, 'empty') and divs.empty:
+            continue
+        # -----------------------------------------------------------------
         if divs.index.tz is not None: divs.index = divs.index.tz_localize(None)
         
         first_buy_date = min(t.date for t in t_list)
@@ -446,60 +487,67 @@ def get_dashboard(wallet_id: int, db: Session = Depends(get_db)):
         "ativos": ativos_finais
     }
 
+# ... (O restante da rota /analyze continua igual)
 @app.get("/analyze/{ticker}")
 def analyze(ticker: str):
-    ticker = ticker.upper().strip()
-    clean = ticker.replace('.SA', '')
-    if not ticker.endswith('.SA'): ticker += '.SA'
-    
-    res = { "ticker": clean, "price": 0, "score": 0, "verdict": "Indisponível", "criteria": { "profit": {"status": "GRAY"}, "governance": {"status": "GRAY"}, "debt": {"status": "GRAY"}, "ipo": {"status": "GRAY"} } }
-    try:
-        t = yf.Ticker(ticker)
-        try: i = t.info
-        except: return res
-        if not i: return res
-        res["price"] = i.get('currentPrice', 0)
+    # Apenas adicionei o rastreamento aqui também
+    tracer = trace.get_tracer(__name__)
+    with tracer.start_as_current_span("analyze_stock_mamute") as span:
+        span.set_attribute("ticker", ticker)
         
-        ipo = 0
-        MAMUTES = ['VALE3','PETR4','PETR3','ITUB4','BBDC4','BBDC3','BBAS3','ABEV3','WEGE3','EGIE3','ITSA4','SANB11','GGBR4','GOAU4','CMIG4','ELET3','ELET6','CSNA3','RADL3','VIVT3','TIMS3','CSMG3','SBSP3','CPLE6','TAEE11','KLBN11','VULC3','LEVE3','TUPY3','PRIO3','POMO4','SAPR11','TRPL4','FLRY3','RENT3','LREN3','JBSS3','BRFS3','MGLU3']
-        if clean in MAMUTES: ipo = 20
-        else:
-            ts = i.get('firstTradeDateEpochUtc')
-            if ts: ipo = (datetime.now() - datetime.fromtimestamp(ts)).days / 365
-            else: ipo = 5 
-        s_ipo = "GREEN" if ipo > 7 else ("YELLOW" if ipo >= 5 else "RED")
-        sc = 2 if s_ipo == "GREEN" else (1 if s_ipo == "YELLOW" else 0)
+        # --- CÓDIGO ORIGINAL ABAIXO ---
+        ticker = ticker.upper().strip()
+        clean = ticker.replace('.SA', '')
+        if not ticker.endswith('.SA'): ticker += '.SA'
         
-        prof_ok = False
-        yrs = 0
+        res = { "ticker": clean, "price": 0, "score": 0, "verdict": "Indisponível", "criteria": { "profit": {"status": "GRAY"}, "governance": {"status": "GRAY"}, "debt": {"status": "GRAY"}, "ipo": {"status": "GRAY"} } }
         try:
-            fin = t.financials
-            if not fin.empty and 'Net Income' in fin.index:
-                v = [x for x in fin.loc['Net Income'].values if not pd.isna(x)]
-                if v:
-                    yrs = len(v)
-                    if sum(1 for x in v if x > 0) == yrs: prof_ok = True
-        except: pass
-        if yrs == 0 and i.get('trailingEps', 0) > 0: prof_ok = True
-        s_prof = "GREEN" if prof_ok else "RED"
-        sc += 2 if prof_ok else 0
-        
-        dr = i.get('debtToEbitda')
-        s_debt = "GREEN"
-        if dr and dr > 3: s_debt = "RED"
-        elif dr and dr > 2: s_debt = "YELLOW"; sc += 1
-        else: sc += 2
-        
-        on = clean[-1] == '3'
-        s_gov = "GREEN" if on else "YELLOW"
-        sc += 2 if on else 1
-        
-        verd = "Tóxica"
-        if s_prof == "RED" or s_debt == "RED" or s_ipo == "RED": verd = "Mamute Vermelho"
-        elif sc >= 8: verd = "Mamute Azul"
-        else: verd = "Mamute Amarelo"
-        
-        res["score"] = sc; res["verdict"] = verd
-        res["criteria"] = { "profit": {"status": s_prof, "years": yrs}, "governance": {"status": s_gov, "type": "ON" if on else "PN"}, "debt": {"status": s_debt, "current_ratio": round(dr,2) if dr else 0}, "ipo": {"status": s_ipo, "years": round(ipo,1)} }
-        return res
-    except: return res
+            t = yf.Ticker(ticker)
+            try: i = t.info
+            except: return res
+            if not i: return res
+            res["price"] = i.get('currentPrice', 0)
+            
+            ipo = 0
+            MAMUTES = ['VALE3','PETR4','PETR3','ITUB4','BBDC4','BBDC3','BBAS3','ABEV3','WEGE3','EGIE3','ITSA4','SANB11','GGBR4','GOAU4','CMIG4','ELET3','ELET6','CSNA3','RADL3','VIVT3','TIMS3','CSMG3','SBSP3','CPLE6','TAEE11','KLBN11','VULC3','LEVE3','TUPY3','PRIO3','POMO4','SAPR11','TRPL4','FLRY3','RENT3','LREN3','JBSS3','BRFS3','MGLU3']
+            if clean in MAMUTES: ipo = 20
+            else:
+                ts = i.get('firstTradeDateEpochUtc')
+                if ts: ipo = (datetime.now() - datetime.fromtimestamp(ts)).days / 365
+                else: ipo = 5 
+            s_ipo = "GREEN" if ipo > 7 else ("YELLOW" if ipo >= 5 else "RED")
+            sc = 2 if s_ipo == "GREEN" else (1 if s_ipo == "YELLOW" else 0)
+            
+            prof_ok = False
+            yrs = 0
+            try:
+                fin = t.financials
+                if not fin.empty and 'Net Income' in fin.index:
+                    v = [x for x in fin.loc['Net Income'].values if not pd.isna(x)]
+                    if v:
+                        yrs = len(v)
+                        if sum(1 for x in v if x > 0) == yrs: prof_ok = True
+            except: pass
+            if yrs == 0 and i.get('trailingEps', 0) > 0: prof_ok = True
+            s_prof = "GREEN" if prof_ok else "RED"
+            sc += 2 if prof_ok else 0
+            
+            dr = i.get('debtToEbitda')
+            s_debt = "GREEN"
+            if dr and dr > 3: s_debt = "RED"
+            elif dr and dr > 2: s_debt = "YELLOW"; sc += 1
+            else: sc += 2
+            
+            on = clean[-1] == '3'
+            s_gov = "GREEN" if on else "YELLOW"
+            sc += 2 if on else 1
+            
+            verd = "Tóxica"
+            if s_prof == "RED" or s_debt == "RED" or s_ipo == "RED": verd = "Mamute Vermelho"
+            elif sc >= 8: verd = "Mamute Azul"
+            else: verd = "Mamute Amarelo"
+            
+            res["score"] = sc; res["verdict"] = verd
+            res["criteria"] = { "profit": {"status": s_prof, "years": yrs}, "governance": {"status": s_gov, "type": "ON" if on else "PN"}, "debt": {"status": s_debt, "current_ratio": round(dr,2) if dr else 0}, "ipo": {"status": s_ipo, "years": round(ipo,1)} }
+            return res
+        except: return res

@@ -1,0 +1,14 @@
+fastapi==0.104.1
+uvicorn==0.24.0
+sqlalchemy==2.0.23
+yfinance>=0.2.40
+pandas==2.1.3
+requests==2.31.0
+certifi==2023.11.17
+pydantic==2.5.2
+# --- DevOps / Observabilidade ---
+prometheus-fastapi-instrumentator==6.1.0
+opentelemetry-api==1.21.0
+opentelemetry-sdk==1.21.0
+opentelemetry-instrumentation-fastapi==0.42b0
+opentelemetry-exporter-otlp==1.21.0
