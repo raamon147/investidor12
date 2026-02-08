@@ -1,6 +1,7 @@
 # Configurações do Backend (Python)
 backend:
   name: backend
+  replicas: 3
   image:
     repository: investidor12-api
     tag: "v5"
@@ -10,7 +11,6 @@ backend:
   persistence:
     enabled: true
     name: db-volume
-  replicas: 3
 
 # Configurações do Frontend (React)
 frontend:
