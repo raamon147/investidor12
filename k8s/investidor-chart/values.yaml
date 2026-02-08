@@ -10,6 +10,7 @@ backend:
   persistence:
     enabled: true
     name: db-volume
+  replicas: 3
 
 # Configurações do Frontend (React)
 frontend:
