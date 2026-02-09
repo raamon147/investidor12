@@ -1,7 +1,7 @@
 # Configurações do Backend (Python)
 backend:
   name: backend
-  replicas: 13
+  replicas: 3
   image:
     repository: investidor12-api
     tag: "v5"
